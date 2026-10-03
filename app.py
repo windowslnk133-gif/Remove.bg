@@ -16,10 +16,18 @@ MODEL_PATH = "u2netp.onnx"
 # 下載模型權重
 if not os.path.exists(MODEL_PATH):
     print("正在下載輕量化 AI 去背模型...")
-    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    try:
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    except Exception as e:
+        print(f"下載模型失敗: {e}")
 
-# 初始化 AI 引擎
-session = ort.InferenceSession(MODEL_PATH, providers=['CPUExecutionProvider'])
+# 初始化 AI 引擎 (修正了讀取名稱的 bug)
+try:
+    session = ort.InferenceSession(MODEL_PATH, providers=['CPUExecutionProvider'])
+    input_name = session.get_inputs()[0].name
+except Exception as e:
+    print(f"AI 引擎初始化失敗: {e}")
+    session = None
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -49,6 +57,9 @@ HTML_TEMPLATE = """
 """
 
 def process_img(img):
+    if session is None:
+        raise Exception("AI 引擎未成功載入")
+        
     # 圖片預處理符合 AI 輸入
     img_gray = img.convert('RGB').resize((320, 320))
     img_np = np.array(img_gray).astype(np.float32) / 255.0
@@ -57,11 +68,10 @@ def process_img(img):
     tmpImg[:,:,1] = (img_np[:,:,1] - 0.456) / 0.224
     tmpImg[:,:,2] = (img_np[:,:,2] - 0.406) / 0.225
     tmpImg = tmpImg.transpose((2, 0, 1))
-    tmpImg = np.expand_dims(tmpImg, list(range(1, 1 + 4 - len(tmpImg.shape))))
-    tmpImg = tmpImg.astype(np.float32)
+    tmpImg = np.expand_dims(tmpImg, axis=0).astype(np.float32)
     
-    # 執行 AI 推理
-    inputs = {session.get_inputs()[0].name: tmpImg}
+    # 執行 AI 推理 (已使用修正後的 input_name)
+    inputs = {input_name: tmpImg}
     pred = session.run(None, inputs)[0][0][0]
     
     # 後處理：將遮罩還原回原圖大小並混合
