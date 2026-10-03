@@ -1,14 +1,16 @@
 import io
+import json
 import os
+import traceback
 import urllib.request
-from flask import Flask, render_template_string, request, send_file
+from flask import Flask, jsonify, render_template_string, request, send_file
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
 app = Flask(__name__)
 
-# 載入輕量化 AI 去背模型 (U2NETp)
+# 免費伺服器專用：線上載入最輕量、最精準的開源去背權重 (U2NETp)
 MODEL_URL = "https://huggingface.co/danielgatis/rembg/resolve/main/u2netp.onnx"
 MODEL_PATH = "u2netp.onnx"
 
@@ -16,7 +18,7 @@ if not os.path.exists(MODEL_PATH):
     print("正在下載輕量化 AI 去背模型...")
     try:
         urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        print("模型下載完成！")
+        print("模型下載成功！")
     except Exception as e:
         print(f"下載模型失敗: {e}")
 
@@ -25,12 +27,12 @@ try:
         MODEL_PATH, providers=["CPUExecutionProvider"]
     )
     input_name = session.get_inputs()[0].name
-    print("AI 去背引擎初始化成功！")
+    print("AI 引擎初始化成功！")
 except Exception as e:
     print(f"AI 引擎初始化失敗: {e}")
     session = None
 
-# 超美現代化網頁 UI
+# 超美現代化網頁 UI（包含錯誤日誌彈窗與 Gmail 回報功能）
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-TW">
@@ -49,27 +51,32 @@ HTML_TEMPLATE = """
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-indigo-950 via-slate-900 to-blue-950 min-h-screen text-slate-100 font-sans flex flex-col justify-between antialiased selection:bg-indigo-500 selection:text-white">
+<body class="bg-gradient-to-br from-indigo-950 via-slate-900 to-blue-950 min-h-screen text-slate-100 font-sans flex flex-col justify-between antialiased">
 
+    <!-- 頂部炫彩裝飾條 -->
     <div class="h-1.5 w-full bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500"></div>
 
+    <!-- 主容器 -->
     <main class="container mx-auto px-4 py-8 flex-grow flex items-center justify-center max-w-5xl">
-        <div class="w-full bg-slate-900/60 backdrop-blur-xl border border-slate-800 p-6 md:p-10 rounded-3xl shadow-2xl transition-all duration-300">
+        <div class="w-full bg-slate-900/60 backdrop-blur-xl border border-slate-800 p-6 md:p-10 rounded-3xl shadow-2xl">
             
+            <!-- 標題區 -->
             <div class="text-center mb-8">
-                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-semibold tracking-wide uppercase mb-3 animate-pulse">
+                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-semibold tracking-wide uppercase mb-3">
                     <i class="fa-solid fa-sparkles"></i> AI Engine v1.4 Powered
                 </div>
                 <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">
                     AI Magic Cut
                 </h1>
                 <p class="text-slate-400 mt-2 text-sm md:text-base">
-                    極致美觀、速度飛快，完全免費的獨立相片去背站
+                    極致美觀、完全免費的獨立相片去背站
                 </p>
             </div>
 
+            <!-- 主工作區：左右對比結構 -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
                 
+                <!-- 左側：上傳/原圖區 -->
                 <div class="space-y-4">
                     <h3 class="text-sm font-semibold text-slate-400 tracking-wider uppercase flex items-center gap-2">
                         <i class="fa-solid fa-image text-indigo-400"></i> 原始圖片
@@ -93,6 +100,7 @@ HTML_TEMPLATE = """
                     </form>
                 </div>
 
+                <!-- 右側：去背輸出區 -->
                 <div class="space-y-4">
                     <h3 class="text-sm font-semibold text-slate-400 tracking-wider uppercase flex items-center gap-2">
                         <i class="fa-solid fa-wand-magic-sparkles text-purple-400"></i> 去背成果
@@ -112,19 +120,36 @@ HTML_TEMPLATE = """
                             <p class="text-xs text-indigo-400 font-medium tracking-wide animate-pulse">AI 正在邊緣精密計算中...</p>
                         </div>
 
-                        <img id="output-preview" class="max-h-[300px] w-full object-contain hidden rounded-xl p-2 select-none group-hover:scale-[1.02] transition-transform duration-300" />
+                        <img id="output-preview" class="max-h-[300px] w-full object-contain hidden rounded-xl p-2 select-none" />
                     </div>
                 </div>
 
             </div>
 
+            <!-- 底部操作區 -->
             <div id="action-area" class="mt-8 pt-6 border-t border-slate-800/60 hidden text-center">
-                <button id="download-btn" class="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold py-3.5 px-8 rounded-xl shadow-lg hover:shadow-indigo-500/20 active:scale-[0.98] transition-all duration-200">
+                <button id="download-btn" class="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold py-3.5 px-8 rounded-xl shadow-lg transition-all duration-200">
                     <i class="fa-solid fa-download"></i> 下載高畫質透明 PNG ✨
                 </button>
                 <button onclick="window.location.reload()" class="ml-4 inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-3.5 px-5 rounded-xl border border-slate-700 transition-all duration-200 text-sm">
                     <i class="fa-solid fa-arrow-rotate-left"></i> 重新一張
                 </button>
+            </div>
+
+            <!-- ⚠️ 錯誤日誌顯示區域（預設隱藏） -->
+            <div id="error-box" class="mt-8 p-6 bg-red-950/40 border border-red-900/50 rounded-2xl hidden">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-3">
+                    <div class="flex items-center gap-2 text-red-400 font-semibold">
+                        <i class="fa-solid fa-circle-exclamation text-lg"></i>
+                        <span>AI 執行發生錯誤！系統崩潰日誌：</span>
+                    </div>
+                    <!-- Gmail 聯絡回報按鈕 -->
+                    <a id="gmail-btn" href="#" target="_blank" class="inline-flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-2 px-4 rounded-lg shadow transition-colors">
+                        <i class="fa-solid fa-envelope"></i> 點此透過 Gmail 回報開發者
+                    </a>
+                </div>
+                <!-- 程式碼錯誤文字區 -->
+                <pre id="error-logs" class="bg-slate-950/80 p-4 rounded-xl text-xs text-red-300 font-mono overflow-x-auto whitespace-pre-wrap max-h-60 border border-red-950 shadow-inner"></pre>
             </div>
 
         </div>
@@ -144,6 +169,14 @@ HTML_TEMPLATE = """
         const actionArea = document.getElementById('action-area');
         const downloadBtn = document.getElementById('download-btn');
         const dropZone = document.getElementById('drop-zone');
+        
+        // 錯誤控制項
+        const errorBox = document.getElementById('error-box');
+        const errorLogs = document.getElementById('error-logs');
+        const gmailBtn = document.getElementById('gmail-btn');
+
+        // 請填寫接收錯誤回報的 Email
+        const DEVELOPER_EMAIL = "armdevs.com@gmail.com"; 
 
         fileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
@@ -152,9 +185,8 @@ HTML_TEMPLATE = """
             inputPreview.src = URL.createObjectURL(file);
             inputPreview.classList.remove('hidden');
             uploadPrompt.classList.add('hidden');
-            dropZone.classList.remove('border-dashed');
-            dropZone.classList.add('border-slate-800');
 
+            errorBox.classList.add('hidden'); // 重置錯誤區
             outputPrompt.classList.add('hidden');
             loadingSpinner.classList.remove('hidden');
             outputPreview.classList.add('hidden');
@@ -176,8 +208,8 @@ HTML_TEMPLATE = """
                     loadingSpinner.classList.add('hidden');
                     outputPreview.src = downloadUrl;
                     outputPreview.classList.remove('hidden');
-
                     actionArea.classList.remove('hidden');
+
                     downloadBtn.onclick = () => {
                         const a = document.createElement('a');
                         a.href = downloadUrl;
@@ -185,14 +217,30 @@ HTML_TEMPLATE = """
                         a.click();
                     };
                 } else {
-                    alert('後端 AI 運算發生錯誤。');
-                    window.location.reload();
+                    // 解析後端傳過來的 JSON 格式錯誤訊息
+                    const errorData = await response.json();
+                    showError(errorData.error, errorData.traceback);
                 }
             } catch (error) {
-                alert('網路連線失敗！');
-                window.location.reload();
+                showError(error.toString(), "網路連線中斷或伺服器超時閃退。");
             }
         });
+
+        function showError(message, tracebackText) {
+            loadingSpinner.classList.add('hidden');
+            outputPrompt.classList.remove('hidden');
+            outputPrompt.innerText = "💥 處理失敗";
+
+            // 顯示錯誤區並渲染日誌
+            errorBox.classList.remove('hidden');
+            const fullLog = `Error: ${message}\\n\\n${tracebackText}`;
+            errorLogs.innerText = fullLog;
+
+            // 建立自動填寫好的 Gmail 連結
+            const subject = encodeURIComponent("【AI 去背站崩潰回報】系統發生異常錯誤");
+            const body = encodeURIComponent(`親愛的開發者您好：\\n\\n我在使用去背站時發生了系統錯誤，以下是我的開發者錯誤日誌：\\n\\n----------------------------\\n${fullLog}\\n----------------------------`);
+            gmailBtn.href = `https://mail.google.com/mail/?view=cm&fs=1&to=${DEVELOPER_EMAIL}&su=${subject}&body=${body}`;
+        }
 
         ['dragenter', 'dragover'].forEach(eventName => {
             dropZone.addEventListener(eventName, () => dropZone.classList.add('border-indigo-500', 'bg-indigo-500/5'), false);
@@ -208,7 +256,7 @@ HTML_TEMPLATE = """
 
 def process_img(img):
     if session is None:
-        raise Exception("AI 引擎未成功載入")
+        raise Exception("AI 引擎未成功載入 (ONNX Session is None)")
 
     img_gray = img.convert("RGB").resize((320, 320))
     img_np = np.array(img_gray).astype(np.float32) / 255.0
@@ -225,9 +273,7 @@ def process_img(img):
     pred = session.run(None, inputs)[0]
 
     pred = (pred - pred.min()) / (pred.max() - pred.min())
-    pred = pred[0][0]
-
-    mask = Image.fromarray((pred * 255).astype(np.uint8)).resize(
+    mask = Image.fromarray((pred[0][0] * 255).astype(np.uint8)).resize(
         img.size, resample=Image.BILINEAR
     )
     empty = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -243,11 +289,17 @@ def index():
 @app.route("/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
-        return "No file provided", 400
+        return (
+            jsonify({"error": "未收到圖片檔案", "traceback": "No file uploaded"}),
+            400,
+        )
 
     file = request.files["file"]
     if file.filename == "":
-        return "No file selected", 400
+        return (
+            jsonify({"error": "未選擇圖片檔名", "traceback": "Empty filename"}),
+            400,
+        )
 
     try:
         input_image = Image.open(file.stream)
@@ -259,8 +311,9 @@ def upload():
 
         return send_file(img_byte_arr, mimetype="image/png")
     except Exception as e:
-        print(f"處理圖片失敗: {e}")
-        return str(e), 500
+        tb = traceback.format_exc()
+        print(f"處理失敗: {e}\n{tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
 
 
 if __name__ == "__main__":
