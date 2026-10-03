@@ -1,15 +1,26 @@
 import os
-from flask import Flask, request, render_template_string, send_file
-from rembg import remove, new_session
 import io
+import json
+import urllib.request
+from flask import Flask, request, render_template_string, send_file
+import numpy as np
+import onnxruntime as ort
 from PIL import Image
 
 app = Flask(__name__)
 
-# 初始化去背模型（使用開源最強的 rmbg 權重）
-session = new_session("rmbg")
+# 免費伺服器專用：線上載入最輕量、最精準的開源去背權重 (U2NETp)
+MODEL_URL = "https://github.com"
+MODEL_PATH = "u2netp.onnx"
 
-# 精美的 HTML/CSS 網頁介面
+# 下載模型權重
+if not os.path.exists(MODEL_PATH):
+    print("正在下載輕量化 AI 去背模型...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+
+# 初始化 AI 引擎
+session = ort.InferenceSession(MODEL_PATH, providers=['CPUExecutionProvider'])
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-TW">
@@ -22,7 +33,7 @@ HTML_TEMPLATE = """
 <body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
     <div class="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center">
         <h1 class="text-3xl font-bold text-gray-800 mb-2">🤖 獨立自建 AI 去背站</h1>
-        <p class="text-gray-500 mb-6">100% 國產自製，無次數限制、不對外連線！</p>
+        <p class="text-gray-500 mb-6">輕量優化版，無次數限制、不看大廠臉色！</p>
         
         <form action="/upload" method="post" enctype="multipart/form-data" class="space-y-4">
             <div class="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-xl p-6 bg-gray-50 relative cursor-pointer hover:bg-gray-100">
@@ -37,6 +48,29 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def process_img(img):
+    # 圖片預處理符合 AI 輸入
+    img_gray = img.convert('RGB').resize((320, 320))
+    img_np = np.array(img_gray).astype(np.float32) / 255.0
+    tmpImg = np.zeros((320, 320, 3))
+    tmpImg[:,:,0] = (img_np[:,:,0] - 0.485) / 0.229
+    tmpImg[:,:,1] = (img_np[:,:,1] - 0.456) / 0.224
+    tmpImg[:,:,2] = (img_np[:,:,2] - 0.406) / 0.225
+    tmpImg = tmpImg.transpose((2, 0, 1))
+    tmpImg = np.expand_dims(tmpImg, list(range(1, 1 + 4 - len(tmpImg.shape))))
+    tmpImg = tmpImg.astype(np.float32)
+    
+    # 執行 AI 推理
+    inputs = {session.get_inputs()[0].name: tmpImg}
+    pred = session.run(None, inputs)[0][0][0]
+    
+    # 後處理：將遮罩還原回原圖大小並混合
+    pred = (pred - pred.min()) / (pred.max() - pred.min())
+    mask = Image.fromarray((pred * 255).astype(np.uint8)).resize(img.size, resample=Image.BILINEAR)
+    
+    empty = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    return Image.composite(img.convert("RGBA"), empty, mask)
+
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
@@ -50,11 +84,9 @@ def upload():
         return "未選擇檔案", 400
 
     try:
-        # 讀取圖片並用本地 AI 模型進行去背
         input_image = Image.open(file.stream)
-        output_image = remove(input_image, session=session)
+        output_image = process_img(input_image)
 
-        # 將結果存入記憶體並回傳讓使用者下載
         img_io = io.BytesIO()
         output_image.save(img_io, 'PNG')
         img_io.seek(0)
